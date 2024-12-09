@@ -617,7 +617,6 @@ void Encoder::flush() {
     putc(x1>>24, archive);  // Flush first unequal byte of range
 }
 
-
 //////////////////////////// User Interface ////////////////////////////
 
 int main(int argc, char **argv) {
