@@ -15,10 +15,16 @@
     Visit <http://www.gnu.org/copyleft/gpl.html>.
 */
 
+#include <stdio.h>
+
 #if defined(_WIN32) || defined(_WIN64)
   #define _CRT_SECURE_NO_WARNINGS
-  #define ftello _ftelli64
-  #define fseeko _fseeki64
+  #ifndef ftello
+    #define ftello _ftelli64
+  #endif
+  #ifndef fseeko
+    #define fseeko _fseeki64
+  #endif
 #else
   #ifndef _FILE_OFFSET_BITS
     #define _FILE_OFFSET_BITS 64
@@ -26,7 +32,6 @@
 #endif
 
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -256,73 +261,60 @@ APM::APM(int n): StateMap(n*24) {
 // - m.p() called once to predict the next bit, returns 0..4095
 // - m.update(y) called once for actual bit y=(0..1).
 
-inline void train(int *t, int *w, int n, int err) {
-  for (int i=0; i<n; ++i)
-    w[i]+=t[i]*err+0x8000>>16;
+inline void train7(int *w, const int *t, int err) {
+  w[0] += (t[0]*err + 0x8000) >> 16;
+  w[1] += (t[1]*err + 0x8000) >> 16;
+  w[2] += (t[2]*err + 0x8000) >> 16;
+  w[3] += (t[3]*err + 0x8000) >> 16;
+  w[4] += (t[4]*err + 0x8000) >> 16;
+  w[5] += (t[5]*err + 0x8000) >> 16;
+  w[6] += (t[6]*err + 0x8000) >> 16;
 }
 
-inline int dot_product(int *t, int *w, int n) {
-  int sum=0;
-  for (int i=0; i<n; ++i)
-    sum+=t[i]*w[i];
-  return sum>>8;
+inline int dot_product7(const int *t, const int *w) {
+  return (t[0]*w[0] + t[1]*w[1] + t[2]*w[2] + t[3]*w[3] + t[4]*w[4] + t[5]*w[5] + t[6]*w[6]) >> 8;
 }
 
 class Mixer {
-  const int N, M;  // max inputs, max contexts
-  int* tx;         // N inputs
-  int* wx;         // N*M weights
-  int cxt;         // context
-  int nx;          // Number of inputs in tx, 0 to N
-  int pr;          // last result (scaled 12 bits)
+  const int M;      // max contexts
+  int tx[7];        // 7 inputs embedded directly
+  int* wx;          // 7*M weights
+  int cxt;          // context
+  int nx;           // Number of inputs in tx, 0 to 7
+  int pr;           // last result (scaled 12 bits)
 public:
   Mixer(int n, int m);
 
   // Adjust weights to minimize coding cost of last prediction
-  void update(int y) {
-    int err=((y<<12)-pr)*7;
+  inline void update(int y) {
+    int err=((y<<12)-pr)*9;
     assert(err>=-32768 && err<32768);
-    train(&tx[0], &wx[cxt*N], N, err);
+    train7(&wx[cxt*7], tx, err);
     nx=0;
   }
 
-  // Input x (call up to N times)
-  void add(int x) {
-    assert(nx<N);
+  // Input x (call up to 7 times)
+  inline void add(int x) {
     tx[nx++]=x;
   }
 
   // Set a context
-  void set(int cx) {
-    assert(cx>=0 && cx<M);
+  inline void set(int cx) {
     cxt=cx;
   }
 
   // predict next bit
-  int p() {
-    return pr=squash(dot_product(&tx[0], &wx[cxt*N], N)>>8);
+  inline int p() {
+    return pr=squash(dot_product7(tx, &wx[cxt*7])>>8);
   }
 };
 
 Mixer::Mixer(int n, int m):
-    N(n), M(m), tx(0), wx(0), cxt(0), nx(0), pr(2048) {
-  assert(n>0 && N>0 && M>0);
-  alloc(tx, N);
-  alloc(wx, N*M);
+    M(m), wx(0), cxt(0), nx(0), pr(2048) {
+  alloc(wx, 7*M);
 }
 
 //////////////////////////// HashTable /////////////////////////
-
-// A HashTable maps a 32-bit index to an array of B bytes.
-// The first byte is a checksum using the upper 8 bits of the
-// index.  The second byte is a priority (0 = empty) for hash
-// replacement.  The index need not be a hash.
-
-// HashTable<B> h(n) - create using n bytes  n and B must be 
-//     powers of 2 with n >= B*4, and B >= 2.
-// h[i] returns array [1..B-1] of bytes indexed by i, creating and
-//     replacing another element if needed.  Element 0 is the
-//     checksum and should not be modified.
 
 template <int B>
 class HashTable {
@@ -330,7 +322,7 @@ class HashTable {
   const size_t N;
 public:
   HashTable(size_t n);
-  U8* operator[](U32 i);
+  inline U8* operator[](U32 i);
 };
 
 template <int B>
@@ -347,12 +339,14 @@ inline U8* HashTable<B>::operator[](U32 i) {
   i=i<<16|i>>16;
   i*=234567891;
   int chk=i>>24;
-  i=i*B&N-B;
+  i=(i*B)&(N-B);
   if (t[i]==chk) return t+i;
-  if (t[i^B]==chk) return t+(i^B);
-  if (t[i^B*2]==chk) return t+(i^B*2);
-  if (t[i+1]>t[i+1^B] || t[i+1]>t[i+1^B*2]) i^=B;
-  if (t[i+1]>t[i+1^B^B*2]) i^=B^B*2;
+  U32 i1=i^B;
+  if (t[i1]==chk) return t+i1;
+  U32 i2=i^(B*2);
+  if (t[i2]==chk) return t+i2;
+  if (t[i+1]>t[i1+1] || t[i+1]>t[i2+1]) i=i1;
+  if (t[i+1]>t[(i^B^(B*2))+1]) i^=B^(B*2);
   memset(t+i, 0, B);
   t[i]=chk;
   return t+i;
@@ -367,26 +361,26 @@ inline U8* HashTable<B>::operator[](U32 i) {
 //     context matched (0..62).
 
 class MatchModel {
-  const int N;  // last buffer index, n/2-1
-  const int HN; // last hash table index, n/8-1
+  const size_t N;   // last buffer index
+  const size_t HN;  // last hash table index
   enum {MAXLEN=62};   // maximum match length, at most 62
   U8* buf;    // input buffer
-  int* ht;    // context hash -> next byte in buf
-  int pos;    // number of bytes in buf
-  int match;  // pointer to current byte in matched context in buf
+  size_t* ht; // context hash -> next byte in buf
+  size_t pos; // number of bytes in buf
+  size_t match; // pointer to current byte in matched context in buf
   int len;    // length of match
   U32 h1, h2; // context hashes
   int c0;     // last 0-7 bits of y
   int bcount; // number of bits in c0 (0..7)
   StateMap sm;  // len, bit, last byte -> prediction
 public:
-  MatchModel(int n);  // n must be a power of 2 at least 8.
+  MatchModel(size_t n);
   int p(int y, Mixer& m);  // update bit y (0..1), predict next bit to m
 };
 
-MatchModel::MatchModel(int n): N(n/2-1), HN(n/8-1), buf(0), ht(0), pos(0), 
+MatchModel::MatchModel(size_t n): N(n/2-1), HN(n/8-1), buf(0), ht(0), pos(0), 
     match(0), len(0), h1(0), h2(0), c0(1), bcount(0), sm(56<<8) {
-  assert(n>=8 && (n&n-1)==0);
+  assert(n>=8 && (n&(n-1))==0);
   alloc(buf, N+1);
   alloc(ht, HN+1);
 }
@@ -413,9 +407,9 @@ int MatchModel::p(int y, Mixer& m) {
     else {
       match=ht[h1];
       if (match!=pos) {
-        int i;
-        while (len<MAXLEN && (i=match-len-1&N)!=pos
-               && buf[i]==buf[pos-len-1&N])
+        size_t i;
+        while (len<MAXLEN && (i=(match-len-1)&N)!=pos
+               && buf[i]==buf[(pos-len-1)&N])
           ++len;
       }
     }
@@ -423,9 +417,9 @@ int MatchModel::p(int y, Mixer& m) {
       len=0;
       match=ht[h2];
       if (match!=pos) {
-        int i;
-        while (len<MAXLEN && (i=match-len-1&N)!=pos
-               && buf[i]==buf[pos-len-1&N])
+        size_t i;
+        while (len<MAXLEN && (i=(match-len-1)&N)!=pos
+               && buf[i]==buf[(pos-len-1)&N])
           ++len;
       }
     }
@@ -459,7 +453,7 @@ int MatchModel::p(int y, Mixer& m) {
 // p() returns P(1) as a 12 bit number (0-4095).
 // update(y) trains the predictor with the actual bit (0 or 1).
 
-const int MEM = 1 << (9 + 20);
+const size_t MEM = 1ULL << (9 + 20);
 
 class Predictor {
   int pr;  // next prediction
@@ -473,7 +467,7 @@ Predictor::Predictor(): pr(2048) {}
 
 void Predictor::update(int y) {
   static U8 t0[0x10000];  // order 1 cxt -> state
-  static HashTable<16> t(MEM*2);  // cxt -> state
+  static HashTable<16> t(MEM*2ULL);  // cxt -> state
   static int c0=1;  // last 0-7 bits with leading 1
   static int c4=0;  // last 4 bytes
   static U8 *cp[6]={t0, t0, t0, t0, t0, t0};  // pointer to bit history
