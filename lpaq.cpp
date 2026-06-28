@@ -15,6 +15,16 @@
     Visit <http://www.gnu.org/copyleft/gpl.html>.
 */
 
+#if defined(_WIN32) || defined(_WIN64)
+  #define _CRT_SECURE_NO_WARNINGS
+  #define ftello _ftelli64
+  #define fseeko _fseeki64
+#else
+  #ifndef _FILE_OFFSET_BITS
+    #define _FILE_OFFSET_BITS 64
+  #endif
+#endif
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,15 +36,6 @@
 #define NDEBUG  // remove for debugging
 #include <assert.h>
 
-#if defined(_WIN32) || defined(_WIN64)
-  #define _CRT_SECURE_NO_WARNINGS
-  #define ftello _ftelli64
-  #define fseeko _fseeki64
-#else
-  #ifndef _FILE_OFFSET_BITS
-    #define _FILE_OFFSET_BITS 64
-  #endif
-#endif
 
 // 8, 16, 32 bit unsigned types (adjust as appropriate)
 typedef unsigned char  U8;
@@ -49,7 +50,7 @@ void quit(const char* message=0) {
 }
 
 // Create an array p of n elements of type T
-template <class T> void alloc(T*&p, int n) {
+template <class T> void alloc(T*&p, size_t n) {
   p=(T*)calloc(n, sizeof(T));
   if (!p) quit("out of memory");
 }
@@ -326,14 +327,14 @@ Mixer::Mixer(int n, int m):
 template <int B>
 class HashTable {
   U8* t;
-  const int N;
+  const size_t N;
 public:
-  HashTable(int n);
+  HashTable(size_t n);
   U8* operator[](U32 i);
 };
 
 template <int B>
-HashTable<B>::HashTable(int n): t(0), N(n) {
+HashTable<B>::HashTable(size_t n): t(0), N(n) {
   assert(B>=2 && (B&B-1)==0);
   assert(N>=B*4 && (N&N-1)==0);
   alloc(t, N+B*4+64);
@@ -677,7 +678,7 @@ int main(int argc, char **argv) {
         Encoder e(COMPRESS, out);
         int c;
         uint64_t processed = 0, last_update = 0;
-        const uint64_t update_interval = size / 10000;
+        const uint64_t update_interval = (size >= 10000) ? (size / 10000) : 1;
         int first_update = 1;
 
         // Initial progress message
@@ -703,13 +704,12 @@ int main(int argc, char **argv) {
     }
     // Decompress
     else {  // argv[1][0] == 'd'
-        if (getc(in) != 'p' || getc(in) != 'Q' || getc(in) != 2) {
-            printf("Not a compatible lpaq file (wrong version).\n");
+        if (getc(in) != 'p' || getc(in) != 'Q' || getc(in) != 2 || getc(in) != '9') {
+            printf("Not a compatible lpaq file (wrong version or compression level).\n");
             fclose(in);
             return 1;
         }
 
-        getc(in);
         uint64_t size = 0;
         for (int i = 7; i >= 0; --i) {
             int byte = getc(in);
@@ -722,6 +722,7 @@ int main(int argc, char **argv) {
         }
         if (size == 0) {
             printf("File is empty\n");
+            fclose(in);
             return 0;
         }
         uint64_t originalSize = size;
@@ -734,7 +735,7 @@ int main(int argc, char **argv) {
 
         Encoder e(DECOMPRESS, in);
         uint64_t processed = 0, last_update = 0;
-        const uint64_t update_interval = size / 10000;
+        const uint64_t update_interval = (size >= 10000) ? (size / 10000) : 1;
         int first_update = 1;
 
         // Initial progress message
