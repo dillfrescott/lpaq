@@ -35,17 +35,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <math.h>
-#include <ctype.h>
 #include <inttypes.h>
 #define NDEBUG  // remove for debugging
 #include <assert.h>
 
 
-// 8, 16, 32 bit unsigned types (adjust as appropriate)
+// 8, 32 bit unsigned types
 typedef unsigned char  U8;
-typedef unsigned short U16;
-typedef unsigned int   U32; // Keep U32
+typedef unsigned int   U32;
 typedef uint64_t U64;
 
 // Error handler: print message if any, and exit
@@ -283,7 +280,7 @@ class Mixer {
   int nx;           // Number of inputs in tx, 0 to 7
   int pr;           // last result (scaled 12 bits)
 public:
-  Mixer(int n, int m);
+  Mixer(int m);
 
   // Adjust weights to minimize coding cost of last prediction
   inline void update(int y) {
@@ -309,7 +306,7 @@ public:
   }
 };
 
-Mixer::Mixer(int n, int m):
+Mixer::Mixer(int m):
     M(m), wx(0), cxt(0), nx(0), pr(2048) {
   alloc(wx, 7*M);
 }
@@ -475,7 +472,7 @@ void Predictor::update(int y) {
   static StateMap sm[6];
   static APM a1(0x100), a2(0x4000);
   static U32 h[6];
-  static Mixer m(7, 80);
+  static Mixer m(80);
   static MatchModel mm(MEM);  // predicts next bit by matching context
   assert(MEM>0);
 
@@ -627,26 +624,59 @@ void Encoder::flush() {
 
 //////////////////////////// User Interface ////////////////////////////
 
+static bool ends_with_lpaq(const char *str) {
+    size_t len = strlen(str);
+    if (len < 5) return false;
+    const char *ext = str + len - 5;
+    return (ext[0] == '.') &&
+           (ext[1] == 'l' || ext[1] == 'L') &&
+           (ext[2] == 'p' || ext[2] == 'P') &&
+           (ext[3] == 'a' || ext[3] == 'A') &&
+           (ext[4] == 'q' || ext[4] == 'Q');
+}
+
 int main(int argc, char **argv) {
-    // Check arguments
-    if (argc != 4 || (argv[1][0] != 'c' && argv[1][0] != 'd')) {
-        printf("Usage: lpaq [c|d] input output\n");
+    char mode = 0;
+    const char *in_filename = NULL;
+    char *out_filename_alloc = NULL;
+    const char *out_filename = NULL;
+
+    if (argc == 2) {
+        in_filename = argv[1];
+        size_t len = strlen(in_filename);
+        if (ends_with_lpaq(in_filename)) {
+            mode = 'd';
+            size_t out_len = len - 5;
+            out_filename_alloc = (char *)malloc(out_len + 1);
+            if (!out_filename_alloc) quit("out of memory");
+            memcpy(out_filename_alloc, in_filename, out_len);
+            out_filename_alloc[out_len] = '\0';
+            out_filename = out_filename_alloc;
+        } else {
+            mode = 'c';
+            size_t out_len = len + 5;
+            out_filename_alloc = (char *)malloc(out_len + 1);
+            if (!out_filename_alloc) quit("out of memory");
+            snprintf(out_filename_alloc, out_len + 1, "%s.lpaq", in_filename);
+            out_filename = out_filename_alloc;
+        }
+    } else {
+        printf("Usage: lpaq <file>  (compresses <file> to <file>.lpaq, or decompresses <file>.lpaq)\n");
         return 1;
     }
 
     clock_t start = clock();
 
-    FILE *in = fopen(argv[2], "rb");
+    FILE *in = fopen(in_filename, "rb");
     if (!in) {
-        perror(argv[2]);
+        perror(in_filename);
+        if (out_filename_alloc) free(out_filename_alloc);
         return 1;
     }
     FILE *out = NULL;
 
-
-
     // Compress
-    if (argv[1][0] == 'c') {
+    if (mode == 'c') {
         fseeko(in, 0, SEEK_END);
         uint64_t size = ftello(in);
         fseeko(in, 0, SEEK_SET);
@@ -654,13 +684,15 @@ int main(int argc, char **argv) {
         if (size == 0) {
             printf("Input file is empty.\n");
             fclose(in);
+            if (out_filename_alloc) free(out_filename_alloc);
             return 1;
         }
 
-        out = fopen(argv[3], "wb");
+        out = fopen(out_filename, "wb");
         if (!out) {
-            perror(argv[3]);
+            perror(out_filename);
             fclose(in);
+            if (out_filename_alloc) free(out_filename_alloc);
             return 1;
         }
         // Write header and file size
@@ -697,10 +729,11 @@ int main(int argc, char **argv) {
         fflush(stdout);
     }
     // Decompress
-    else {  // argv[1][0] == 'd'
+    else {  // mode == 'd'
         if (getc(in) != 'p' || getc(in) != 'Q' || getc(in) != 2 || getc(in) != '9') {
             printf("Not a compatible lpaq file (wrong version or compression level).\n");
             fclose(in);
+            if (out_filename_alloc) free(out_filename_alloc);
             return 1;
         }
 
@@ -710,6 +743,7 @@ int main(int argc, char **argv) {
             if (byte == EOF) {
                 printf("Unexpected EOF while reading file size.\n");
                 fclose(in);
+                if (out_filename_alloc) free(out_filename_alloc);
                 return 1;
             }
             size |= (uint64_t)byte << (i * 8);
@@ -717,13 +751,15 @@ int main(int argc, char **argv) {
         if (size == 0) {
             printf("File is empty\n");
             fclose(in);
+            if (out_filename_alloc) free(out_filename_alloc);
             return 0;
         }
         uint64_t originalSize = size;
-        out = fopen(argv[3], "wb");
+        out = fopen(out_filename, "wb");
         if (!out) {
-            perror(argv[3]);
+            perror(out_filename);
             fclose(in);
+            if (out_filename_alloc) free(out_filename_alloc);
             return 1;
         }
 
@@ -753,7 +789,7 @@ int main(int argc, char **argv) {
         printf("\rDecompressing: 100.00%%");
         fflush(stdout);
     }
-    
+
     assert(in);
     assert(out);
     printf("\n%" PRIu64 " -> %" PRIu64 " in %1.2f sec. using %d MB memory.\n",
@@ -762,5 +798,6 @@ int main(int argc, char **argv) {
 
     fclose(in);
     if (out) fclose(out);
+    if (out_filename_alloc) free(out_filename_alloc);
     return 0;
 }
