@@ -258,40 +258,31 @@ APM::APM(int n): StateMap(n*24) {
 // - m.p() called once to predict the next bit, returns 0..4095
 // - m.update(y) called once for actual bit y=(0..1).
 
-inline void train7(int *w, const int *t, int err) {
-  w[0] += (t[0]*err + 0x8000) >> 16;
-  w[1] += (t[1]*err + 0x8000) >> 16;
-  w[2] += (t[2]*err + 0x8000) >> 16;
-  w[3] += (t[3]*err + 0x8000) >> 16;
-  w[4] += (t[4]*err + 0x8000) >> 16;
-  w[5] += (t[5]*err + 0x8000) >> 16;
-  w[6] += (t[6]*err + 0x8000) >> 16;
-}
-
-inline int dot_product7(const int *t, const int *w) {
-  return (t[0]*w[0] + t[1]*w[1] + t[2]*w[2] + t[3]*w[3] + t[4]*w[4] + t[5]*w[5] + t[6]*w[6]) >> 8;
-}
-
 class Mixer {
   const int M;      // max contexts
-  int tx[7];        // 7 inputs embedded directly
-  int* wx;          // 7*M weights
+  const int N;      // number of inputs
+  int tx[32];       // inputs buffer
+  int* wx;          // N*M weights
   int cxt;          // context
-  int nx;           // Number of inputs in tx, 0 to 7
+  int nx;           // Number of inputs in tx
   int pr;           // last result (scaled 12 bits)
 public:
-  Mixer(int m);
+  Mixer(int m, int n = 7);
 
   // Adjust weights to minimize coding cost of last prediction
   inline void update(int y) {
     int err=((y<<12)-pr)*9;
     assert(err>=-32768 && err<32768);
-    train7(&wx[cxt*7], tx, err);
+    int *w = &wx[cxt*N];
+    for (int i = 0; i < N; ++i) {
+      w[i] += (tx[i]*err + 0x8000) >> 16;
+    }
     nx=0;
   }
 
-  // Input x (call up to 7 times)
+  // Input x
   inline void add(int x) {
+    assert(nx < N);
     tx[nx++]=x;
   }
 
@@ -302,13 +293,18 @@ public:
 
   // predict next bit
   inline int p() {
-    return pr=squash(dot_product7(tx, &wx[cxt*7])>>8);
+    int sum = 0;
+    const int *w = &wx[cxt*N];
+    for (int i = 0; i < N; ++i) {
+      sum += tx[i] * w[i];
+    }
+    return pr=squash(sum >> 16);
   }
 };
 
-Mixer::Mixer(int m):
-    M(m), wx(0), cxt(0), nx(0), pr(2048) {
-  alloc(wx, 7*M);
+Mixer::Mixer(int m, int n):
+    M(m), N(n), wx(0), cxt(0), nx(0), pr(2048) {
+  alloc(wx, N*M);
 }
 
 //////////////////////////// HashTable /////////////////////////
@@ -467,23 +463,19 @@ void Predictor::update(int y) {
   static HashTable<16> t(MEM*2ULL);  // cxt -> state
   static int c0=1;  // last 0-7 bits with leading 1
   static int c4=0;  // last 4 bytes
-  static U8 *cp[6]={t0, t0, t0, t0, t0, t0};  // pointer to bit history
+  static U8 *cp[12]={t0, t0, t0, t0, t0, t0, t0, t0, t0, t0, t0, t0};  // pointer to bit history
   static int bcount=0;  // bit count
-  static StateMap sm[6];
+  static StateMap sm[12];
   static APM a1(0x100), a2(0x4000);
-  static U32 h[6];
-  static Mixer m(80);
+  static U32 h[12];
+  static Mixer m(80, 13);  // 13 inputs (1 match model + 12 state maps)
   static MatchModel mm(MEM);  // predicts next bit by matching context
   assert(MEM>0);
 
   // update model
   assert(y==0 || y==1);
-  *cp[0]=nex(*cp[0], y);
-  *cp[1]=nex(*cp[1], y);
-  *cp[2]=nex(*cp[2], y);
-  *cp[3]=nex(*cp[3], y);
-  *cp[4]=nex(*cp[4], y);
-  *cp[5]=nex(*cp[5], y);
+  for (int i = 0; i < 12; ++i)
+    *cp[i]=nex(*cp[i], y);
   m.update(y);
 
   // update context
@@ -497,31 +489,33 @@ void Predictor::update(int y) {
     h[2]=(c4<<8)*3;  // order 3
     h[3]=c4*5;  // order 4
     h[4]=h[4]*(11<<5)+c0*13&0x3fffffff;  // order 6
-    if (c0>=65 && c0<=90) c0+=32;  // lowercase unigram word order
-    if (c0>=97 && c0<=122) h[5]=(h[5]+c0)*(7<<3);
+    int c0_word = c0;
+    if (c0_word>=65 && c0_word<=90) c0_word+=32;  // lowercase unigram word order
+    if (c0_word>=97 && c0_word<=122) h[5]=(h[5]+c0_word)*(7<<3);
     else h[5]=0;
-    cp[1]=t[h[1]]+1;
-    cp[2]=t[h[2]]+1;
-    cp[3]=t[h[3]]+1;
-    cp[4]=t[h[4]]+1;
-    cp[5]=t[h[5]]+1;
+    h[6]=h[6]*(13<<5)+c0*17&0x3fffffff;  // order 5 rolling context
+    h[7]=((c0<<8)|((c4>>8)&0xff))*9;  // skip-1 context
+    h[8]=((c0<<8)|((c4>>16)&0xff))*13;  // skip-2 context
+    h[9]=((c4&0xffff00)>>8)*11;  // 2-byte stride context
+    if ((c0>='a' && c0<='z') || (c0>='A' && c0<='Z') || (c0>='0' && c0<='9'))
+      h[10]=(h[10]+(c0&0x1f))*(5<<3);  // general word context
+    else
+      h[10]=0;
+    h[11]=(((c4&0xff)|((c4>>16)&0xff00))*17)&0x3fffffff;  // sparse order 3 context
+
+    for (int i = 1; i < 12; ++i)
+      cp[i]=t[h[i]]+1;
     c0=1;
     bcount=0;
   }
   if (bcount==4) {
-    cp[1]=t[h[1]+c0]+1;
-    cp[2]=t[h[2]+c0]+1;
-    cp[3]=t[h[3]+c0]+1;
-    cp[4]=t[h[4]+c0]+1;
-    cp[5]=t[h[5]+c0]+1;
+    for (int i = 1; i < 12; ++i)
+      cp[i]=t[h[i]+c0]+1;
   }
   else if (bcount>0) {
     int j=y+1<<(bcount&3)-1;
-    cp[1]+=j;
-    cp[2]+=j;
-    cp[3]+=j;
-    cp[4]+=j;
-    cp[5]+=j;
+    for (int i = 1; i < 12; ++i)
+      cp[i]+=j;
   }
   cp[0]=t0+h[0]+c0;
 
@@ -529,18 +523,15 @@ void Predictor::update(int y) {
     int len = mm.p(y, m);
     int order = 0;
     if (len == 0) {
+        if (*cp[6]) ++order;
         if (*cp[4]) ++order;
         if (*cp[3]) ++order;
         if (*cp[2]) ++order;
         if (*cp[1]) ++order;
     }
     else order = 5 + (len >= 8) + (len >= 12) + (len >= 16) + (len >= 32);
-    m.add(stretch(sm[0].p(y, *cp[0])));
-    m.add(stretch(sm[1].p(y, *cp[1])));
-    m.add(stretch(sm[2].p(y, *cp[2])));
-    m.add(stretch(sm[3].p(y, *cp[3])));
-    m.add(stretch(sm[4].p(y, *cp[4])));
-    m.add(stretch(sm[5].p(y, *cp[5])));
+    for (int i = 0; i < 12; ++i)
+        m.add(stretch(sm[i].p(y, *cp[i])));
     m.set(order + 10 * (h[0] >> 13));
     pr = m.p();
     pr = pr + 3 * a1.pp(y, pr, c0) >> 2;
