@@ -468,7 +468,7 @@ void Predictor::update(int y) {
   static StateMap sm[12];
   static APM a1(0x100), a2(0x4000);
   static U32 h[12];
-  static Mixer m(655360, 13);  // 13 inputs (1 match model + 12 state maps)
+  static Mixer m(80, 13);  // 13 inputs (1 match model + 12 state maps)
   static MatchModel mm(MEM);  // predicts next bit by matching context
   assert(MEM>0);
 
@@ -532,7 +532,7 @@ void Predictor::update(int y) {
     else order = 5 + (len >= 8) + (len >= 12) + (len >= 16) + (len >= 32);
     for (int i = 0; i < 12; ++i)
         m.add(stretch(sm[i].p(y, *cp[i])));
-    m.set(order + 10 * (c0 | ((c4 & 0xff) << 8)));
+    m.set(order + 10 * (h[0] >> 13));
     pr = m.p();
     pr = pr + 3 * a1.pp(y, pr, c0) >> 2;
     pr = pr + 3 * a2.pp(y, pr, c0 ^ h[0] >> 2) >> 2;
